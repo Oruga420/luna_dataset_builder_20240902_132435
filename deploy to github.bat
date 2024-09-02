@@ -142,9 +142,17 @@ if not "!actual_url!"=="%remote_url%" (
 
 echo Remote origin added and verified successfully.
 
+:: Get current branch name
+for /f "tokens=2" %%i in ('git branch --show-current') do set "current_branch=%%i"
+if "%current_branch%"=="" set "current_branch=master"
+
+:: Commit any pending changes
+git add .
+git commit -m "Update before push" || echo No changes to commit.
+
 :: Push to GitHub
 echo Pushing to GitHub...
-git push -u origin main
+git push -u origin %current_branch%
 if %errorlevel% neq 0 (
     echo Error: Failed to push to GitHub.
     echo Checking remote URL:
