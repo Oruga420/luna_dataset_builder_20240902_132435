@@ -10,6 +10,8 @@ import PyPDF2  # Add this import
 import io
 import csv
 from docx import Document
+import base64
+import requests
 
 # Load environment variables
 load_dotenv()
@@ -158,6 +160,73 @@ def create_dataset(name):
         pass
     return full_path
 
+#analize images
+def process_image(file):
+    api_key = os.getenv('LUNAS_OPENAI_API_KEY')
+    
+    if not api_key:
+        return "Error: OpenAI API key not found in environment variables."
+    
+    try:
+        print(f"Processing image: {file.name}")
+        
+        # Read and encode the image
+        image_content = file.read()
+        base64_image = base64.b64encode(image_content).decode('utf-8')
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+
+        payload = {
+            "model": "gpt-4o-mini",  # You can change this to "gpt-4o" if needed
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image in detail, focusing on all visible elements, their relationships, and any text present. Provide a comprehensive analysis without making assumptions. If the context is unclear, focus solely on describing what you can see in the image."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 500
+        }
+
+        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+        
+        if response.status_code == 200:
+            image_description = response.json()['choices'][0]['message']['content']
+            print("Image processed successfully")
+            return image_description
+        else:
+            error_content = response.json()
+            error_message = f"Error processing image: API returned status code {response.status_code}. Error details: {json.dumps(error_content, indent=2)}"
+            print(error_message)
+            return error_message
+
+    except json.JSONDecodeError:
+        error_message = f"Error processing image: Invalid JSON response from API. Response content: {response.text}"
+        print(error_message)
+        return error_message
+    except requests.RequestException as e:
+        error_message = f"Error making request to OpenAI API: {str(e)}"
+        print(error_message)
+        return error_message
+    except Exception as e:
+        error_message = f"Unexpected error processing image: {str(e)}"
+        print(error_message)
+        return error_message
+
 def process_input(dataset_option, new_dataset_name, input_type, content, existing_dataset, document_file):
     # Handle dataset selection or creation
     if "Create New Dataset" in dataset_option:
@@ -180,9 +249,9 @@ def process_input(dataset_option, new_dataset_name, input_type, content, existin
             return "Please provide a YouTube URL."
         processed_content = extract_youtube_transcript(content)
     elif input_type == "Image/Diagram":
-        if not content:
-            return "Please provide an image file path."
-        processed_content = analyze_image(content)
+        if not document_file:
+            return "Please upload an image file."
+        processed_content = process_image(document_file)
     elif input_type == "Text":
         if not content:
             return "Please provide some text content."
@@ -203,6 +272,7 @@ def process_input(dataset_option, new_dataset_name, input_type, content, existin
 
     if not processed_content.strip():
         return "Error: No content was extracted from the input. Please check your file or input and try again."
+
     # Send processed content to OpenAI assistant
     assistant_response = send_to_openai(processed_content, input_type)
     
@@ -360,7 +430,7 @@ with gr.Blocks() as app:
     with gr.Row():
         input_type = gr.Radio(["YouTube Link", "Image/Diagram", "Text", "Documents", "URL Scraping"], label="Input Type")
         content_input = gr.Textbox(label="Content (URL, text, or file path)")
-        document_file = gr.File(label="Upload Document", visible=False)
+        document_file = gr.File(label="Upload Document/Image", visible=False)
 
     submit_btn = gr.Button("Process and Add to Dataset")
     output = gr.Textbox(label="Output")
@@ -374,9 +444,9 @@ with gr.Blocks() as app:
 
     def update_input_visibility(input_type):
         return {
-            content_input: gr.update(visible=input_type != "Documents"),
-            document_file: gr.update(visible=input_type == "Documents")
-        }
+            content_input: gr.update(visible=input_type not in ["Documents", "Image/Diagram"]),
+            document_file: gr.update(visible=input_type in ["Documents", "Image/Diagram"])
+    }
 
     dataset_option.change(update_visibility_and_datasets, dataset_option, [existing_dataset, new_dataset_name])
     input_type.change(update_input_visibility, input_type, [content_input, document_file])
