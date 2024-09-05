@@ -6,12 +6,17 @@ from werkzeug.utils import secure_filename
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
-import PyPDF2  # Add this import
+import PyPDF2
 import io
 import csv
 from docx import Document
 import base64
 from PIL import Image
+import tempfile
+import hashlib
+import mimetypes
+import shutil
+from moviepy.editor import VideoFileClip
 
 # Load environment variables
 load_dotenv()
@@ -23,7 +28,6 @@ ASSISTANT_ID = "asst_Fd7cOhXiCamVGAC5h7Gd5qVw"
 # Specify the folder for storing datasets
 DATASET_FOLDER = r"G:\My Drive\Luna_dataset\datasets\datasets jsonl"
 
-
 def process_image(file):
     api_key = os.getenv('LUNAS_OPENAI_API_KEY')
     
@@ -31,39 +35,19 @@ def process_image(file):
         return "Error: OpenAI API key not found in environment variables."
     
     try:
-        print(f"Processing image: {file.name}")
-        print(f"File object: {file}")
-        print(f"File attributes: {dir(file)}")
-        print(f"File name: {file.name}")
-        print(f"Original name: {getattr(file, 'orig_name', 'Not available')}")
+        # Check if file is a BytesIO object or a file object
+        file_name = getattr(file, 'name', 'BytesIO Image')  # If it's a BytesIO, use a default name
+        print(f"Processing image: {file_name}")
 
-        # Try to get file size
-        try:
-            file_size = os.path.getsize(file.name)
-            print(f"File size (os.path.getsize): {file_size} bytes")
-        except Exception as e:
-            print(f"Error getting file size: {str(e)}")
-
-        # Try to read file content directly
-        try:
-            with open(file.name, 'rb') as f:
+        # Read the content
+        if isinstance(file, io.BytesIO):
+            content = file.getvalue()
+        else:
+            with open(file_name, 'rb') as f:
                 content = f.read()
-            print(f"Successfully read {len(content)} bytes directly from file")
-        except Exception as e:
-            print(f"Error reading file directly: {str(e)}")
-            content = b''
-
-        # If direct read failed, try using file.read()
-        if len(content) == 0:
-            try:
-                file.seek(0)
-                content = file.read()
-                print(f"Read {len(content)} bytes using file.read()")
-            except Exception as e:
-                print(f"Error reading file using file.read(): {str(e)}")
 
         if len(content) == 0:
-            return f"Error: The file is empty or could not be read. File: {file.name}"
+            return f"Error: The file is empty or could not be read. File: {file_name}"
 
         # Try to open the image to verify it's a valid image file
         try:
@@ -120,10 +104,51 @@ def process_image(file):
         error_message = f"Unexpected error processing image: {str(e)}"
         print(error_message)
         return error_message
+
+
+
+def process_video(file):
+    print(f"Processing video: {file.name}")
     
-    
-    
-# Function to send user input to OpenAI API and process the response
+    try:
+        # Use the file path directly instead of loading into memory
+        file_path = file.name
+
+        # Use moviepy to analyze the video
+        try:
+            clip = VideoFileClip(file_path)
+            duration = clip.duration
+            fps = clip.fps
+            size = clip.size
+            
+            # Extract a frame from the middle of the video
+            middle_frame = clip.get_frame(duration / 2)
+            
+            # Convert the frame to a PIL Image
+            frame_image = Image.fromarray(middle_frame)
+            
+            # Process the frame image
+            with io.BytesIO() as frame_bytes:
+                frame_image.save(frame_bytes, format='JPEG')
+                frame_bytes.seek(0)
+                frame_description = process_image(frame_bytes)
+        except Exception as e:
+            return f"Error analyzing video: {str(e)}"
+
+        # Prepare the response
+        response = "Video file information:\n\n"
+        response += f"File name: {file.name}\n"
+        response += f"Duration: {duration:.2f} seconds\n"
+        response += f"FPS: {fps}\n"
+        response += f"Resolution: {size[0]}x{size[1]}\n"
+        response += f"\nMiddle frame description:\n{frame_description}\n"
+
+        return response
+
+    except Exception as e:
+        return f"Error processing video: {str(e)}"
+
+
 def send_to_openai(user_text, input_type):
     if not user_text.strip():
         return "Error: Empty content. Please provide some text to process."
@@ -172,7 +197,12 @@ def send_to_openai(user_text, input_type):
         For the system message, create a context related to the document's topic or type.
         For the user message, formulate a relevant question or request based on the document content.
         For the assistant message, provide an informative response drawing from the document.
-        Ensure entries are substantive and showcase different aspects of understanding and generating content related to the document."""
+        Ensure entries are substantive and showcase different aspects of understanding and generating content related to the document.""",
+        "Video": """You are processing video content including visual descriptions and audio transcripts. Summarize key points and generate 3-5 diverse JSONL entries for fine-tuning a language model. Each entry should be a complete JSON object on a single line, containing a 'messages' array with 'system', 'user', and 'assistant' messages. 
+        For the system message, create a context related to the video content, considering both visual and audio elements.
+        For the user message, formulate a relevant question or request based on the video description and transcript.
+        For the assistant message, provide an informative response drawing from both visual and audio aspects of the video content.
+        Ensure entries are substantive and showcase different aspects of understanding and generating content related to the video, including visual analysis and spoken content."""
     }
 
     instruction = instructions.get(input_type, f"""Generate 3-5 diverse JSONL entries for fine-tuning a language model on {input_type} processing tasks. Each entry should be a complete JSON object on a single line, containing a 'messages' array with 'system', 'user', and 'assistant' messages. 
@@ -231,7 +261,6 @@ def send_to_openai(user_text, input_type):
 
     return full_response
 
-# Function to extract transcript from YouTube video
 def extract_youtube_transcript(url):
     try:
         parsed_url = urlparse(url)
@@ -251,219 +280,9 @@ def extract_youtube_transcript(url):
     except Exception as e:
         return f"Error extracting transcript: {str(e)}"
 
-# Function to analyze images
-def analyze_image(image_path):
-    return f"Analysis of image at {image_path}"
-
-# Function to scrape content from URL
 def scrape_url(url):
     return f"Content scraped from {url}"
 
-# Function to process document content
-def process_document(file_path):
-    return f"Content extracted from document: {file_path}"
-
-# Function to get available datasets
-def get_datasets():
-    os.makedirs(DATASET_FOLDER, exist_ok=True)
-    return [f for f in os.listdir(DATASET_FOLDER) if f.endswith('.jsonl')]
-
-# Function to create a new dataset
-def create_dataset(name):
-    filename = secure_filename(f"{name}.jsonl")
-    full_path = os.path.join(DATASET_FOLDER, filename)
-    with open(full_path, 'w', encoding='utf-8') as f:
-        pass
-    return full_path
-
-# Function to process images
-
-def process_image(file):
-    api_key = os.getenv('LUNAS_OPENAI_API_KEY')
-    
-    if not api_key:
-        return "Error: OpenAI API key not found in environment variables."
-    
-    try:
-        print(f"Processing image: {file.name}")
-        print(f"File object: {file}")
-        print(f"File attributes: {dir(file)}")
-        print(f"File name: {file.name}")
-        print(f"Original name: {getattr(file, 'orig_name', 'Not available')}")
-
-        # Try to get file size
-        try:
-            file_size = os.path.getsize(file.name)
-            print(f"File size (os.path.getsize): {file_size} bytes")
-        except Exception as e:
-            print(f"Error getting file size: {str(e)}")
-
-        # Try to read file content directly
-        try:
-            with open(file.name, 'rb') as f:
-                content = f.read()
-            print(f"Successfully read {len(content)} bytes directly from file")
-        except Exception as e:
-            print(f"Error reading file directly: {str(e)}")
-            content = b''
-
-        # If direct read failed, try using file.read()
-        if len(content) == 0:
-            try:
-                file.seek(0)
-                content = file.read()
-                print(f"Read {len(content)} bytes using file.read()")
-            except Exception as e:
-                print(f"Error reading file using file.read(): {str(e)}")
-
-        if len(content) == 0:
-            return f"Error: The file is empty or could not be read. File: {file.name}"
-
-        # Try to open the image to verify it's a valid image file
-        try:
-            img = Image.open(io.BytesIO(content))
-            img.verify()
-            print(f"Image format: {img.format}, Size: {img.size}")
-        except Exception as e:
-            return f"Error: Invalid image file. {str(e)}"
-        
-        # Encode the image content to base64
-        base64_image = base64.b64encode(content).decode('utf-8')
-        print(f"Base64 preview: {base64_image[:50]}...")
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-
-        payload = {
-            "model": "gpt-4-vision-preview",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Describe this image in detail, focusing on all visible elements, their relationships, and any text present. Provide a comprehensive analysis without making assumptions. If the context is unclear, focus solely on describing what you can see in the image."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/{img.format.lower()};base64,{base64_image}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            "max_tokens": 300
-        }
-
-        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
-        
-        if response.status_code == 200:
-            image_description = response.json()['choices'][0]['message']['content']
-            print("Image processed successfully")
-            return image_description
-        else:
-            error_content = response.json()
-            error_message = f"Error processing image: API returned status code {response.status_code}. Error details: {json.dumps(error_content, indent=2)}"
-            print(error_message)
-            return error_message
-
-    except Exception as e:
-        error_message = f"Unexpected error processing image: {str(e)}"
-        print(error_message)
-        return error_message
-
-# Function to process user input and add it to the selected dataset
-def process_input(dataset_option, new_dataset_name, input_type, content, existing_dataset, document_file):
-    # Handle dataset selection or creation
-    if "Create New Dataset" in dataset_option:
-        if not new_dataset_name:
-            return "Please provide a name for the new dataset."
-        dataset = create_dataset(new_dataset_name)
-    elif "Select Existing Dataset" in dataset_option:
-        if not existing_dataset:
-            return "Please select an existing dataset."
-        dataset = os.path.join(DATASET_FOLDER, existing_dataset)
-    else:
-        return "Please select a dataset option and provide necessary information."
-
-    if not input_type:
-        return "Please select an input type."
-
-    # Process different input types
-    try:
-        if input_type == "YouTube Link":
-            if not content:
-                return "Please provide a YouTube URL."
-            processed_content = extract_youtube_transcript(content)
-        elif input_type == "Image/Diagram":
-            if not document_file:
-                return "Please upload an image file."
-            print(f"Document file: {document_file}")
-            print(f"Document file attributes: {dir(document_file)}")
-            processed_content = process_image(document_file)
-            print(f"Processed content: {processed_content[:100]}...")  # Print first 100 characters
-        elif input_type == "Text":
-            if not content:
-                return "Please provide some text content."
-            processed_content = content
-        elif input_type == "Documents":
-            if not document_file:
-                return "Please upload a document file."
-            processed_content = process_file(document_file)
-        elif input_type == "URL Scraping":
-            if not content:
-                return "Please provide a URL to scrape."
-            processed_content = scrape_url(content)
-        else:
-            return f"Invalid input type: {input_type}"
-
-        if processed_content.startswith("Error"):
-            return processed_content
-
-        if not processed_content.strip():
-            return "Error: No content was extracted from the input. Please check your file or input and try again."
-
-        # Send processed content to OpenAI assistant
-        assistant_response = send_to_openai(processed_content, input_type)
-        
-        if assistant_response.startswith("Error"):
-            return assistant_response
-
-        # Parse the assistant's response
-        jsonl_entries = []
-        for line in assistant_response.strip().split('\n'):
-            try:
-                entry = json.loads(line)
-                jsonl_entries.append(entry)
-            except json.JSONDecodeError:
-                print(f"Skipping invalid JSON entry: {line}")
-
-        if not jsonl_entries:
-            return "No valid entries were generated. The assistant's response did not contain proper JSON data. Please try again or adjust your input."
-
-        # Write valid entries to the JSONL file
-        try:
-            with open(dataset, 'a', encoding='utf-8') as f:
-                for entry in jsonl_entries:
-                    json.dump(entry, f, ensure_ascii=False)
-                    f.write('\n')
-        except IOError as e:
-            return f"Error writing to dataset: {str(e)}"
-
-        # Format the output for display
-        formatted_output = f"Content processed and added to dataset {dataset}:\n\n"
-        for entry in jsonl_entries:
-            formatted_output += json.dumps(entry, indent=2, ensure_ascii=False) + "\n\n"
-
-        return formatted_output
-
-    except Exception as e:
-        return f"An unexpected error occurred: {str(e)}"
-
-# Function to process different types of files (PDF, TXT, Word, CSV)
 def process_file(file):
     if not file:
         return "Error: No file provided."
@@ -509,7 +328,6 @@ def process_file(file):
     except Exception as e:
         return f"Error processing file: {str(e)}"
 
-# Function to process PDF files
 def process_pdf(file):
     try:
         pdf_reader = PyPDF2.PdfReader(file)
@@ -523,7 +341,6 @@ def process_pdf(file):
     except Exception as e:
         return f"Error processing PDF: {str(e)}"
 
-# Function to process TXT files
 def process_txt(file):
     try:
         print(f"Starting to process TXT file: {file.name}")
@@ -551,7 +368,6 @@ def process_txt(file):
     except Exception as e:
         return f"Error processing TXT file: {str(e)}"
 
-# Function to process Word documents
 def process_word(file):
     try:
         doc = Document(file)
@@ -563,7 +379,6 @@ def process_word(file):
     except Exception as e:
         return f"Error processing Word document: {str(e)}"
 
-# Function to process CSV files
 def process_csv(file):
     try:
         content = file.read()
@@ -578,14 +393,113 @@ def process_csv(file):
     except Exception as e:
         return f"Error processing CSV file: {str(e)}"
 
-# Function to update the visibility of input fields based on the selected input type
+def get_datasets():
+    os.makedirs(DATASET_FOLDER, exist_ok=True)
+    return [f for f in os.listdir(DATASET_FOLDER) if f.endswith('.jsonl')]
+
+def create_dataset(name):
+    filename = secure_filename(f"{name}.jsonl")
+    full_path = os.path.join(DATASET_FOLDER, filename)
+    with open(full_path, 'w', encoding='utf-8') as f:
+        pass
+    return full_path
+
+import json
+
+def process_input(dataset_option, new_dataset_name, input_type, content, existing_dataset, document_file):
+    # Handle dataset selection or creation
+    if "Create New Dataset" in dataset_option:
+        if not new_dataset_name:
+            return "Please provide a name for the new dataset."
+        dataset = create_dataset(new_dataset_name)
+    elif "Select Existing Dataset" in dataset_option:
+        if not existing_dataset:
+            return "Please select an existing dataset."
+        dataset = os.path.join(DATASET_FOLDER, existing_dataset)
+    else:
+        return "Please select a dataset option and provide necessary information."
+
+    if not input_type:
+        return "Please select an input type."
+
+    try:
+        # Process different input types
+        if input_type == "YouTube Link":
+            if not content:
+                return "Please provide a YouTube URL."
+            processed_content = extract_youtube_transcript(content)
+        elif input_type == "Image/Diagram":
+            if not document_file:
+                return "Please upload an image file."
+            processed_content = process_image(document_file)
+        elif input_type == "Text":
+            if not content:
+                return "Please provide some text content."
+            processed_content = content
+        elif input_type == "Documents":
+            if not document_file:
+                return "Please upload a document file."
+            processed_content = process_file(document_file)
+        elif input_type == "URL Scraping":
+            if not content:
+                return "Please provide a URL to scrape."
+            processed_content = scrape_url(content)
+        elif input_type == "Video":
+            if not document_file:
+                return "Please upload a video file."
+            processed_content = process_video(document_file)
+        else:
+            return f"Invalid input type: {input_type}"
+
+        if processed_content.startswith("Error"):
+            return processed_content
+
+        if not processed_content.strip():
+            return "Error: No content was extracted from the input. Please check your file or input and try again."
+
+        # Send processed content to OpenAI assistant
+        assistant_response = send_to_openai(processed_content, input_type)
+
+        if assistant_response.startswith("Error"):
+            return assistant_response
+
+        # Construct the JSONL structure
+        jsonl_entry = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": f"You are processing {input_type} content for fine-tuning a language model."
+                },
+                {
+                    "role": "user",
+                    "content": processed_content
+                },
+                {
+                    "role": "assistant",
+                    "content": assistant_response
+                }
+            ]
+        }
+
+        # Save the JSONL entry to the selected dataset
+        try:
+            with open(dataset, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(jsonl_entry) + "\n")
+        except IOError as e:
+            return f"Error writing to dataset: {str(e)}"
+
+        return f"Content processed and added to dataset {dataset}. Assistant's response:\n\n{assistant_response}"
+
+    except Exception as e:
+        return f"An unexpected error occurred: {str(e)}"
+
+
 def update_input_visibility(input_type):
     return {
-        content_input: gr.update(visible=input_type not in ["Documents", "Image/Diagram"]),
-        document_file: gr.update(visible=input_type in ["Documents", "Image/Diagram"])
+        content_input: gr.update(visible=input_type not in ["Documents", "Image/Diagram", "Video"]),
+        document_file: gr.update(visible=input_type in ["Documents", "Image/Diagram", "Video"])
     }
 
-# Function to handle the process button click, process input, and update the UI
 def process_and_update(dataset_option, new_dataset_name, input_type, content, existing_dataset, document_file):
     result = process_input(dataset_option, new_dataset_name, input_type, content, existing_dataset, document_file)
     updated_datasets = get_datasets()
@@ -601,9 +515,9 @@ with gr.Blocks() as app:
         new_dataset_name = gr.Textbox(label="New Dataset Name")
 
     with gr.Row():
-        input_type = gr.Radio(["YouTube Link", "Image/Diagram", "Text", "Documents", "URL Scraping"], label="Input Type")
+        input_type = gr.Radio(["YouTube Link", "Image/Diagram", "Text", "Documents", "URL Scraping", "Video"], label="Input Type")
         content_input = gr.Textbox(label="Content (URL, text, or file path)")
-        document_file = gr.File(label="Upload Document/Image", visible=False)
+        document_file = gr.File(label="Upload Document/Image/Video", visible=False)
 
     submit_btn = gr.Button("Process and Add to Dataset")
     output = gr.Textbox(label="Output")
